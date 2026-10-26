@@ -102,13 +102,15 @@ JOBS_KEY=alt+j pi
 - pi-subagents: separate widget key and the same `aboveEditor` placement, so both widgets stack.
   No status-bar key is shared.
 - No new transcript entries, no tool changes, no model context; the panel is pure UI.
+- systemd **≥ 250** reports timers with their next elapse; older versions fall back to the plain table, so
+timer rows show names only.
 - Developed and tested against pi **1.4.0** (`@earendil-works/pi-coding-agent`,
   `@earendil-works/pi-tui`). Both are peer dependencies supplied by pi and deliberately not bundled.
 
 ## Development
 
 ```bash
-bun test                           # parsing, ownership filter, layout (25 tests)
+bun test                           # parsing, ownership filter, layout (26 tests)
 bun test/live.ts                   # real machine smoke check (spawns a sleep, prints the panel)
 bunx tsc --noEmit -p tsconfig.json # typecheck against pi's real types
 ```

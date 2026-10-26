@@ -150,6 +150,14 @@ describe("systemd parsing", () => {
 		expect(parseUnitNames("not json")).toEqual([]);
 	});
 
+	test("old systemd text tables fall back to names", () => {
+		const units = "  backup.service loaded active running Daily backup\n● other.service loaded active running Other\n";
+		expect(parseUnitNames(units)).toEqual(["backup.service", "other.service"]);
+		expect(parseTimers("NEXT LEFT LAST PASSED UNIT ACTIVATES\nn/a n/a n/a n/a backup.timer backup.service\n")).toEqual([
+			{ unit: "backup.timer", nextAt: null },
+		]);
+	});
+
 	test("timers convert the microsecond 'next' field to epoch ms", () => {
 		const raw = JSON.stringify([{ unit: "t.timer", next: 1_793_048_400_000_000, activates: "t.service" }]);
 		expect(parseTimers(raw)).toEqual([{ unit: "t.timer", nextAt: 1_793_048_400_000, activates: "t.service" }]);

@@ -271,21 +271,53 @@ export function scopeArgs(scope: Scope): string[] {
 	return scope === "user" ? ["--user"] : [];
 }
 
+const UNIT_SUFFIX = /\.(?:service|socket|timer|target|mount|automount|path|swap|slice|scope|device)$/;
+
+/** Units from `list-units --output=json`; older systemd (no JSON output) falls back to the table. */
 export function parseUnitNames(raw: string): string[] {
-	try {
-		const parsed: unknown = JSON.parse(raw.trim() || "[]");
-		if (!Array.isArray(parsed)) return [];
-		return parsed
-			.map((row) => (row && typeof (row as { unit?: unknown }).unit === "string" ? (row as { unit: string }).unit : undefined))
-			.filter((unit): unit is string => !!unit);
-	} catch {
-		return [];
+	const text = raw.trim();
+	if (!text) return [];
+	if (text.startsWith("[")) {
+		try {
+			const parsed: unknown = JSON.parse(text);
+			if (!Array.isArray(parsed)) return [];
+			return parsed
+				.map((row) => (row && typeof (row as { unit?: unknown }).unit === "string" ? (row as { unit: string }).unit : undefined))
+				.filter((unit): unit is string => !!unit);
+		} catch {
+			return [];
+		}
 	}
+	// Text table: "unit load active sub description", optionally prefixed with ●/○ markers.
+	const units: string[] = [];
+	for (const line of text.split("\n")) {
+		for (const token of line.trim().split(/\s+/)) {
+			if (UNIT_SUFFIX.test(token)) {
+				units.push(token);
+				break;
+			}
+		}
+	}
+	return units;
 }
 
+/**
+ * Timers from `list-timers --output=json` (next/left/last/passed are microseconds). The text
+ * fallback only yields unit names: without JSON there is no reliable locale-independent timestamp.
+ */
 export function parseTimers(raw: string): Omit<SystemdTimer, "scope">[] {
+	const text = raw.trim();
+	if (!text) return [];
+	if (!text.startsWith("[")) {
+		const timers: Omit<SystemdTimer, "scope">[] = [];
+		for (const line of text.split("\n")) {
+			const unit = line.trim().split(/\s+/).find((token) => token.endsWith(".timer"));
+			if (unit) timers.push({ unit, nextAt: null });
+		}
+		return timers;
+	}
 	try {
-		const parsed: unknown = JSON.parse(raw.trim() || "[]");
+		const parsed: unknown = JSON.parse(text);
 		if (!Array.isArray(parsed)) return [];
 		const timers: Omit<SystemdTimer, "scope">[] = [];
 		for (const row of parsed) {
