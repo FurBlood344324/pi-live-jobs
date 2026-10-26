@@ -32,7 +32,7 @@ same space: both use `setWidget(..., { placement: "aboveEditor" })` with their o
 
 | Section | Source | Notes |
 |---|---|---|
-| `scripts` | `/proc` | Live descendants of the pi process: tool commands, MCP servers, the servers and scripts you started. A `bash -lc "…"` wrapper with a single child is collapsed into that child. |
+| `scripts` | `/proc` | Live descendants of the pi process: tool commands, MCP servers, the servers and scripts you started. A `bash -lc "…"` wrapper with a single child is collapsed into that child, and absolute program paths are shortened to the program name. |
 | `↗ … detached` | remembered pids, `PI_SESSION_ID` | A process pi started that outlived its parent (`nohup … &`). Recognised either by remembering the pid **and** start time (a reused pid is never shown as the old job) or by the session id in its environment, so a job that detached before the first poll is still found. |
 | `user units` / `system units` | `systemctl` | Active services (and timers) whose unit file you wrote — `~/.config/systemd/user`, `~/.local/share/systemd/user`, or `/etc/systemd/system`. Distribution services are filtered out. |
 | `timers` | `systemctl list-timers` | Only the timers you defined, with their next elapse. |

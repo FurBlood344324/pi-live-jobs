@@ -51,8 +51,10 @@ describe("commandText", () => {
 		expect(commandText(["/bin/sh", "-c", "python3 train.py --epochs 3"])).toBe("python3 train.py --epochs 3");
 	});
 
-	test("leaves a normal command alone and handles an empty argv", () => {
+	test("leaves a normal command alone, shortens absolute programs and handles an empty argv", () => {
 		expect(commandText(["node", "server.js"])).toBe("node server.js");
+		expect(commandText(["/usr/bin/node", "server.js"])).toBe("node server.js");
+		expect(commandText(["bash", "-lc", "/usr/bin/python3 train.py"])).toBe("python3 train.py");
 		expect(commandText([])).toBe("");
 		expect(isShellWrapper(["node", "-c", "x"])).toBe(false);
 	});

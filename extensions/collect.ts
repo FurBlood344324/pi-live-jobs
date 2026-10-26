@@ -116,15 +116,24 @@ export function isShellWrapper(argv: string[]): boolean {
 	return shellCommandIndex(argv) >= 0;
 }
 
-/** The interesting part of argv: a shell wrapper is reduced to the command it was asked to run. */
+/**
+ * The interesting part of argv: a shell wrapper is reduced to the command it was asked to run, and
+ * an absolute program path is shown by its name so long paths do not eat the row.
+ */
 export function commandText(argv: string[]): string {
 	if (argv.length === 0) return "";
 	const at = shellCommandIndex(argv);
 	if (at >= 0) {
-		const command = argv.slice(at + 1).join(" ").trim();
+		const command = joinArgv(argv.slice(at + 1)).trim();
 		if (command) return command;
 	}
-	return argv.join(" ");
+	return joinArgv(argv);
+}
+
+function joinArgv(argv: string[]): string {
+	if (argv.length === 0) return "";
+	const program = argv[0].startsWith("/") ? basename(argv[0]) : argv[0];
+	return [program, ...argv.slice(1)].join(" ");
 }
 
 interface ProcTable {
