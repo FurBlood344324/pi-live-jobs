@@ -1,0 +1,43 @@
+{
+  "name": "pi-live-jobs",
+  "version": "0.1.0",
+  "description": "Live jobs panel for pi: scripts spawned from pi and active systemd units/timers/jobs in a collapsible widget above the editor.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "tui",
+    "jobs",
+    "processes",
+    "systemd",
+    "widget"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FurBlood344324/pi-live-jobs.git"
+  },
+  "homepage": "https://github.com/FurBlood344324/pi-live-jobs#readme",
+  "bugs": {
+    "url": "https://github.com/FurBlood344324/pi-live-jobs/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
