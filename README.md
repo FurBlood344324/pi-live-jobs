@@ -33,7 +33,7 @@ same space: both use `setWidget(..., { placement: "aboveEditor" })` with their o
 | Section | Source | Notes |
 |---|---|---|
 | `scripts` | `/proc` | Live descendants of the pi process: tool commands, MCP servers, the servers and scripts you started. A `bash -lc "…"` wrapper with a single child is collapsed into that child. |
-| `↗ … detached` | remembered pids | A process pi started that outlived its parent (`nohup … &`). Remembered by pid **and** start time, so a reused pid is never shown as the old job. |
+| `↗ … detached` | remembered pids, `PI_SESSION_ID` | A process pi started that outlived its parent (`nohup … &`). Recognised either by remembering the pid **and** start time (a reused pid is never shown as the old job) or by the session id in its environment, so a job that detached before the first poll is still found. |
 | `user units` / `system units` | `systemctl` | Active services (and timers) whose unit file you wrote — `~/.config/systemd/user`, `~/.local/share/systemd/user`, or `/etc/systemd/system`. Distribution services are filtered out. |
 | `timers` | `systemctl list-timers` | Only the timers you defined, with their next elapse. |
 | `jobs` | `systemctl list-jobs` | Units with a queued/running job (`start`, `stop`, …). Usually empty. |
@@ -110,7 +110,7 @@ timer rows show names only.
 ## Development
 
 ```bash
-bun test                           # parsing, ownership filter, layout (26 tests)
+bun test                           # parsing, ownership filter, layout (27 tests)
 bun test/live.ts                   # real machine smoke check (spawns a sleep, prints the panel)
 bunx tsc --noEmit -p tsconfig.json # typecheck against pi's real types
 ```

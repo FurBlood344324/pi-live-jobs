@@ -129,6 +129,7 @@ export function commandText(argv: string[]): string {
 
 interface ProcTable {
 	procs: Map<number, ProcInfo>;
+	descendants: Set<number>;
 	uptimeSec: number;
 }
 
@@ -179,7 +180,7 @@ async function readProcTable(rootPid: number): Promise<ProcTable> {
 		}),
 	);
 
-	return { procs, uptimeSec };
+	return { procs, descendants: wanted, uptimeSec };
 }
 
 function childMap(procs: Map<number, ProcInfo>): Map<number, number[]> {
@@ -238,18 +239,18 @@ export function buildScripts(
 }
 
 /**
- * Processes remembered as pi's children that are still alive after being reparented. Start time
- * must match, so a recycled pid is dropped instead of being shown as a stale job.
+ * Processes remembered as pi's that are still alive outside pi's process tree. Start time must
+ * match, so a recycled pid is dropped instead of being shown as a stale job.
  */
 export function detachedJobs(
 	remembered: Map<number, Remembered>,
 	procs: Map<number, ProcInfo>,
-	seen: ReadonlySet<number>,
+	inside: ReadonlySet<number>,
 	uptimeSec: number,
 ): ScriptJob[] {
 	const rows: ScriptJob[] = [];
 	for (const [pid, record] of remembered) {
-		if (seen.has(pid)) continue;
+		if (inside.has(pid)) continue;
 		const info = procs.get(pid);
 		if (!info || info.startTicks !== record.startTicks || info.state === "Z") continue;
 		rows.push({
@@ -378,6 +379,12 @@ function execText(scope: Scope, args: string[]): Promise<string> {
 
 // ---- collector ----
 
+/** Bash-tool commands carry the session id, which survives reparenting. */
+export function hasSessionMarker(environ: string, sessionId: string | undefined): boolean {
+	if (!sessionId) return false;
+	return environ.split("\0").includes(`PI_SESSION_ID=${sessionId}`);
+}
+
 export interface CollectorOptions {
 	rootPid?: number;
 	home?: string;
@@ -385,6 +392,8 @@ export interface CollectorOptions {
 	includeSystem?: boolean;
 	/** Show every active unit instead of only units the user defined. */
 	allUnits?: boolean;
+	/** Current pi session id, used to recognise detached bash-tool commands. */
+	sessionId?: string;
 	now?: () => number;
 }
 
@@ -410,8 +419,10 @@ export function emptySnapshot(at = Date.now()): Snapshot {
 }
 
 export class JobsCollector {
-	private readonly opts: Required<Omit<CollectorOptions, "now">> & { now: () => number };
+	private readonly opts: Required<Omit<CollectorOptions, "now" | "sessionId">> & { now: () => number; sessionId?: string };
 	private readonly remembered = new Map<number, Remembered>();
+	/** Pids whose /proc/<pid>/environ was already read; pruned when they exit. */
+	private readonly envChecked = new Set<number>();
 	private cache?: { at: number; units: SystemdUnit[]; timers: SystemdTimer[]; jobs: SystemdJob[] };
 
 	constructor(options: CollectorOptions = {}) {
@@ -421,17 +432,18 @@ export class JobsCollector {
 			minAgeMs: options.minAgeMs ?? DEFAULT_MIN_AGE_MS,
 			includeSystem: options.includeSystem ?? true,
 			allUnits: options.allUnits ?? false,
+			sessionId: options.sessionId,
 			now: options.now ?? Date.now,
 		};
 	}
 
 	async collect(force = false): Promise<Snapshot> {
 		const at = this.opts.now();
-		const { procs, uptimeSec } = await readProcTable(this.opts.rootPid);
+		const { procs, descendants, uptimeSec } = await readProcTable(this.opts.rootPid);
 		const scripts = buildScripts(procs, this.opts.rootPid, { uptimeSec, minAgeMs: this.opts.minAgeMs });
-		const seen = new Set(scripts.map((row) => row.pid));
-		const detached = detachedJobs(this.remembered, procs, seen, uptimeSec);
 		this.remember(scripts, procs);
+		await this.adoptSessionJobs(procs, descendants, uptimeSec);
+		const detached = detachedJobs(this.remembered, procs, descendants, uptimeSec);
 
 		const cached = this.cache;
 		const systemd =
@@ -458,6 +470,47 @@ export class JobsCollector {
 			const info = procs.get(pid);
 			if (!info || info.startTicks !== record.startTicks) this.remembered.delete(pid);
 		}
+	}
+
+	/**
+	 * Detect processes launched by the agent's bash tool that already left pi's process tree
+	 * (`nohup … &`): their environment still names this session. Each pid is inspected once, which
+	 * keeps the scan cheap — only newly appeared pids cost a read.
+	 */
+	private async adoptSessionJobs(procs: Map<number, ProcInfo>, descendants: Set<number>, uptimeSec: number): Promise<void> {
+		if (!this.opts.sessionId) return;
+		for (const pid of this.envChecked) if (!procs.has(pid)) this.envChecked.delete(pid);
+
+		const rootStart = procs.get(this.opts.rootPid)?.startTicks ?? 0;
+		const candidates: number[] = [];
+		for (const info of procs.values()) {
+			if (info.pid === this.opts.rootPid || info.state === "Z") continue;
+			if (descendants.has(info.pid) || this.envChecked.has(info.pid)) continue;
+			if (info.startTicks < rootStart) continue;
+			candidates.push(info.pid);
+		}
+
+		await Promise.all(
+			candidates.map(async (pid) => {
+				this.envChecked.add(pid);
+				let environ: string;
+				try {
+					environ = await readFile(`/proc/${pid}/environ`, "utf8");
+				} catch {
+					return;
+				}
+				if (!hasSessionMarker(environ, this.opts.sessionId)) return;
+				const info = procs.get(pid);
+				if (!info || elapsedMs(info.startTicks, uptimeSec) < this.opts.minAgeMs) return;
+				let argv: string[] = [];
+				try {
+					argv = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0").filter((part) => part.length > 0);
+				} catch {
+					// gone already; the next poll will see it if it survived
+				}
+				this.remembered.set(pid, { startTicks: info.startTicks, command: commandText(argv) || `[${info.comm}]` });
+			}),
+		);
 	}
 
 	private async readSystemd(): Promise<{ units: SystemdUnit[]; timers: SystemdTimer[]; jobs: SystemdJob[] }> {

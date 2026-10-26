@@ -3,6 +3,7 @@ import {
 	buildScripts,
 	commandText,
 	detachedJobs,
+	hasSessionMarker,
 	isOwnUnit,
 	isShellWrapper,
 	parseFragments,
@@ -119,6 +120,16 @@ describe("detachedJobs", () => {
 		expect(detachedJobs(remembered, reused, new Set(), 1000)).toEqual([]);
 		const inside = table(proc(50, 100, ["python3", "worker.py"], { startTicks: 98_000 }));
 		expect(detachedJobs(remembered, inside, new Set([50]), 1000)).toEqual([]);
+	});
+});
+
+describe("hasSessionMarker", () => {
+	test("matches only the exact PI_SESSION_ID entry", () => {
+		const environ = "PATH=/bin\0PI_SESSION_ID=abc\0AI_AGENT=pi\0";
+		expect(hasSessionMarker(environ, "abc")).toBe(true);
+		expect(hasSessionMarker(environ, "abcd")).toBe(false);
+		expect(hasSessionMarker(environ, undefined)).toBe(false);
+		expect(hasSessionMarker("PATH=/bin\0PI_SESSION_ID=abc-other\0", "abc")).toBe(false);
 	});
 });
 

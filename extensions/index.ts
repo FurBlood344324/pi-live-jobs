@@ -182,6 +182,7 @@ export default function liveJobs(pi: ExtensionAPI) {
 			includeSystem: envFlag("JOBS_SYSTEM", true),
 			allUnits: envFlag("JOBS_ALL_UNITS", false),
 			minAgeMs: envNumber("JOBS_MIN_AGE_MS", DEFAULT_MIN_AGE_MS),
+			sessionId: context.sessionManager.getSessionId(),
 		});
 		void refresh(true);
 		poller = setInterval(() => void refresh(), POLL_MS);
