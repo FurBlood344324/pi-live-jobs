@@ -6,11 +6,13 @@ import {
 	hasSessionMarker,
 	isOwnUnit,
 	isShellWrapper,
-	parseFragments,
 	parseJobs,
 	parseStat,
 	parseTimers,
+	parseUnitInfo,
 	parseUnitNames,
+	startedThisSession,
+	unitsInCommand,
 	type ProcInfo,
 	type Remembered,
 } from "../extensions/collect";
@@ -183,10 +185,56 @@ describe("systemd parsing", () => {
 		]);
 	});
 
-	test("fragment paths are grouped per unit block", () => {
-		const raw = "Id=a.service\nFragmentPath=/home/u/.config/systemd/user/a.service\n\nId=b.service\nFragmentPath=/usr/lib/systemd/user/b.service\n";
-		const paths = parseFragments(raw);
-		expect(paths.get("a.service")).toBe("/home/u/.config/systemd/user/a.service");
-		expect(paths.get("b.service")).toBe("/usr/lib/systemd/user/b.service");
+	test("unit blocks carry the fragment path and the activation stamp", () => {
+		const raw = [
+			"Id=a.service",
+			"FragmentPath=/home/u/.config/systemd/user/a.service",
+			"ActiveEnterTimestampMonotonic=1234567",
+			"",
+			"Id=b.service",
+			"FragmentPath=/usr/lib/systemd/user/b.service",
+			"ActiveEnterTimestampMonotonic=0",
+			"",
+			"Id=c.service",
+			"FragmentPath=",
+		].join("\n");
+		const infos = parseUnitInfo(raw);
+		expect(infos.get("a.service")).toEqual({
+			fragmentPath: "/home/u/.config/systemd/user/a.service",
+			activeMonoUs: 1_234_567,
+		});
+		// 0 means "not active": no stamp, and an empty FragmentPath is treated as absent.
+		expect(infos.get("b.service")).toEqual({ fragmentPath: "/usr/lib/systemd/user/b.service" });
+		expect(infos.get("c.service")).toEqual({});
+		expect(parseUnitInfo("")).toEqual(new Map());
+	});
+});
+
+describe("session unit scope", () => {
+	test("only units activated after the session start count as this session's", () => {
+		const sessionStart = 5_000_000;
+		expect(startedThisSession({ activeMonoUs: sessionStart + 1 }, sessionStart)).toBe(true);
+		expect(startedThisSession({ activeMonoUs: sessionStart }, sessionStart)).toBe(true);
+		// Started at boot or in an earlier session: hidden.
+		expect(startedThisSession({ activeMonoUs: sessionStart - 1 }, sessionStart)).toBe(false);
+		expect(startedThisSession({}, sessionStart)).toBe(false);
+		expect(startedThisSession(undefined, sessionStart)).toBe(false);
+		expect(startedThisSession({ activeMonoUs: 1 }, undefined)).toBe(false);
+	});
+
+	test("unitsInCommand names the units a command acts on", () => {
+		expect(unitsInCommand("systemctl --user start mc-autopilot")).toEqual(["mc-autopilot.service"]);
+		expect(unitsInCommand("systemctl restart a.service b.timer")).toEqual(["a.service", "b.timer"]);
+		expect(unitsInCommand("systemd-run --user --unit=job1 -- sleep 5")).toEqual(["job1.service"]);
+		expect(unitsInCommand("systemctl start foo && echo done | cat")).toEqual(["foo.service"]);
+		expect(unitsInCommand("npm run dev")).toEqual([]);
+		expect(unitsInCommand("")).toEqual([]);
+	});
+
+	test("listing and reporting commands claim no unit of their own", () => {
+		expect(unitsInCommand("systemctl list-units --type=service --state=running")).toEqual([]);
+		expect(unitsInCommand("systemctl --user status")).toEqual([]);
+		// journalctl -u only reads a unit's log; it never activates anything.
+		expect(unitsInCommand("journalctl -u bar --since today")).toEqual([]);
 	});
 });

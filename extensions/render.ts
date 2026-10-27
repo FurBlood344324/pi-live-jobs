@@ -66,6 +66,16 @@ export function countsText(snapshot: Snapshot): string {
 	return parts.join(" · ");
 }
 
+/**
+ * Which units the panel is willing to show, short enough for the one-line header: in session scope a
+ * row means "this session started it", so the header says so instead of implying machine-wide state.
+ */
+export function scopeHint(snapshot: Snapshot): string {
+	if (snapshot.unitScope === "session") return " · this session";
+	if (snapshot.unitScope === "all") return " · all units";
+	return "";
+}
+
 function scriptRow(job: ScriptJob, theme: PanelTheme): string {
 	const glyph = job.detached ? theme.fg("warning", "↗") : theme.fg("accent", "●");
 	const elapsed = theme.fg("dim", formatElapsed(job.elapsedMs).padEnd(4));
@@ -90,9 +100,12 @@ export function renderPanel(
 	options: PanelOptions = {},
 ): string[] {
 	const counts = countsText(snapshot);
-	const title = `${theme.fg("accent", "⚙")} ${theme.bold("jobs")}${counts ? ` ${theme.fg("muted", counts)}` : ` ${theme.fg("dim", "idle")}`}`;
-	const hint = options.toggleKey ? theme.fg("dim", options.toggleKey) : "";
-	const lines: string[] = [hint ? `${title}  ${hint}` : title];
+	const hint = scopeHint(snapshot);
+	const title = `${theme.fg("accent", "⚙")} ${theme.bold("jobs")}${
+		counts ? ` ${theme.fg("muted", counts)}` : ` ${theme.fg("dim", "idle")}`
+	}${hint ? theme.fg("dim", hint) : ""}`;
+	const keyHint = options.toggleKey ? theme.fg("dim", options.toggleKey) : "";
+	const lines: string[] = [keyHint ? `${title}  ${keyHint}` : title];
 
 	if (state.expanded) {
 		const body: string[] = [

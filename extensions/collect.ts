@@ -7,6 +7,11 @@
  * "Scripts" are the processes pi itself spawned (the bash tool, long-running commands), plus the
  * ones that were pi's children earlier and later detached (`nohup … &`) — those are remembered by
  * pid and start time so a reused pid is never mistaken for the old process.
+ *
+ * Units, timers and jobs are session-scoped by default: a row appears only when this session started
+ * the unit (systemd's activation stamp falls inside the session) or named it on a command line
+ * (`systemctl start …`). Units left running by an earlier session, or started at boot, stay hidden —
+ * the panel answers "what did *this* session set running", not "what is active on the machine".
  */
 import { execFile } from "node:child_process";
 import { readFile, readdir, realpath } from "node:fs/promises";
@@ -23,6 +28,24 @@ export const UNIT_REFRESH_MS = 8_000;
 export const DEFAULT_MIN_AGE_MS = 400;
 
 export type Scope = "user" | "system";
+
+/**
+ * Which systemd units the panel is allowed to show:
+ *   "session" — only units this pi session started or invoked (the default), so units left over from
+ *               an earlier session or from boot do not clutter the panel;
+ *   "owner"   — every active unit whose unit file lives in the user's own systemd config;
+ *   "all"     — every active unit, distribution units included.
+ */
+export type UnitScope = "session" | "owner" | "all";
+
+/** What `systemctl show` reports for one unit. */
+export interface UnitInfo {
+	fragmentPath?: string;
+	/** Symlink target of the fragment path; dotfile-managed units resolve outside the config dir. */
+	realPath?: string;
+	/** `ActiveEnterTimestampMonotonic` in µs since boot; undefined when systemd does not report it. */
+	activeMonoUs?: number;
+}
 
 export interface ScriptJob {
 	pid: number;
@@ -62,6 +85,8 @@ export interface Snapshot {
 	units: SystemdUnit[];
 	timers: SystemdTimer[];
 	jobs: SystemdJob[];
+	/** How the unit/timer sections were filtered, so the panel can say so. */
+	unitScope?: UnitScope;
 }
 
 export interface ProcInfo {
@@ -359,20 +384,119 @@ export function parseJobs(raw: string, scope: Scope): SystemdJob[] {
 	return jobs;
 }
 
-/** Parse `systemctl show -p Id -p FragmentPath` output: blocks separated by blank lines. */
-export function parseFragments(raw: string): Map<string, string> {
-	const paths = new Map<string, string>();
+/**
+ * Parse `systemctl show -p Id -p FragmentPath -p ActiveEnterTimestampMonotonic` output: units are
+ * separated by blank lines, and every property line is optional (an inactive unit has a path but no
+ * timestamp).
+ */
+export function parseUnitInfo(raw: string): Map<string, UnitInfo> {
+	const infos = new Map<string, UnitInfo>();
 	for (const block of raw.split(/\n\s*\n/)) {
 		let id: string | undefined;
-		let path: string | undefined;
+		const info: UnitInfo = {};
 		for (const line of block.split("\n")) {
 			const text = line.trim();
 			if (text.startsWith("Id=")) id = text.slice("Id=".length);
-			else if (text.startsWith("FragmentPath=")) path = text.slice("FragmentPath=".length);
+			else if (text.startsWith("FragmentPath=")) info.fragmentPath = text.slice("FragmentPath=".length) || undefined;
+			else if (text.startsWith("ActiveEnterTimestampMonotonic=")) {
+				const value = Number(text.slice("ActiveEnterTimestampMonotonic=".length));
+				if (Number.isFinite(value) && value > 0) info.activeMonoUs = value;
+			}
 		}
-		if (id && path) paths.set(id, path);
+		if (id) infos.set(id, info);
 	}
-	return paths;
+	return infos;
+}
+
+/** Verbs after which `systemctl` names the units it acts on. */
+const SYSTEMCTL_VERBS = new Set([
+	"start",
+	"stop",
+	"restart",
+	"try-restart",
+	"reload",
+	"try-reload-or-restart",
+	"reload-or-restart",
+	"restart-or-reload",
+	"enable",
+	"disable",
+	"reenable",
+	"preset",
+	"mask",
+	"unmask",
+	"isolate",
+	"kill",
+	"clean",
+	"freeze",
+	"thaw",
+]);
+
+const SEGMENT_BREAK = "\u0000";
+
+/** Split a shell command line into words, keeping a marker where one command ends and the next begins. */
+function commandWords(text: string): string[] {
+	return text
+		.replace(/[;&|()<>`"']/g, ` ${SEGMENT_BREAK} `)
+		.split(/\s+/)
+		.filter((word) => word.length > 0);
+}
+
+/** `mc-autopilot` → `mc-autopilot.service`, but a name that already carries a unit suffix is left alone. */
+function asUnitName(word: string): string {
+	const clean = word.replace(/^[-=]+/, "").replace(/,$/, "");
+	return UNIT_SUFFIX.test(clean) ? clean : `${clean}.service`;
+}
+
+/**
+ * Unit names a command line starts or otherwise acts on. Read-only is the point of this panel, so the
+ * collector never runs these commands — it only watches the ones the agent asked for. Two shapes are
+ * recognised: an explicit `<name>.service|timer|…` token anywhere in the line, and the units listed
+ * after a `systemctl <verb>` / `systemd-run --unit=<name>`. `systemctl status`, `show` and
+ * `list-units` activate nothing and are ignored.
+ */
+export function unitsInCommand(text: string): string[] {
+	const found = new Set<string>();
+	if (!text.trim()) return [];
+	const words = commandWords(text);
+
+	for (const word of words) {
+		if (UNIT_SUFFIX.test(word.replace(/,$/, ""))) found.add(word.replace(/,$/, ""));
+	}
+
+	for (let index = 0; index < words.length; index += 1) {
+		const program = basename(words[index].replace(/^[-=]+/, ""));
+		const isRunner = program === "systemd-run";
+		if (!isRunner && program !== "systemctl") continue;
+
+		let verb: string | undefined;
+		for (let cursor = index + 1; cursor < words.length; cursor += 1) {
+			const word = words[cursor];
+			if (word === SEGMENT_BREAK) break;
+			if (word.startsWith("--unit=") || word.startsWith("-u=")) {
+				found.add(asUnitName(word.slice(word.indexOf("=") + 1)));
+				continue;
+			}
+			if (word.startsWith("-")) continue;
+			if (!verb) {
+				if (!SYSTEMCTL_VERBS.has(word)) break;
+				verb = word;
+				continue;
+			}
+			if (SYSTEMCTL_VERBS.has(word) || word === "--now") break;
+			found.add(asUnitName(word));
+		}
+	}
+
+	return [...found];
+}
+
+/**
+ * Was the unit activated inside this session's window? Compares systemd's monotonic activation stamp
+ * with the session start in the same boot-relative clock, so a wall-clock jump cannot mislead it.
+ */
+export function startedThisSession(info: UnitInfo | undefined, sessionMonoUs: number | undefined): boolean {
+	if (!info || info.activeMonoUs === undefined || sessionMonoUs === undefined) return false;
+	return info.activeMonoUs >= sessionMonoUs;
 }
 
 function execText(scope: Scope, args: string[]): Promise<string> {
@@ -399,8 +523,10 @@ export interface CollectorOptions {
 	home?: string;
 	minAgeMs?: number;
 	includeSystem?: boolean;
-	/** Show every active unit instead of only units the user defined. */
-	allUnits?: boolean;
+	/** Which units to show; `session` (the default) hides anything this session did not touch. */
+	unitScope?: UnitScope;
+	/** `Date.now()` when the session started; units activated later count as this session's. */
+	sessionStartedAt?: number;
 	/** Current pi session id, used to recognise detached bash-tool commands. */
 	sessionId?: string;
 	now?: () => number;
@@ -427,12 +553,44 @@ export function emptySnapshot(at = Date.now()): Snapshot {
 	return { at, scripts: [], units: [], timers: [], jobs: [] };
 }
 
+/** `/proc/uptime` in seconds; 0 when it cannot be read (systemd timestamps are then unusable). */
+async function readUptimeSec(): Promise<number> {
+	try {
+		return Number.parseFloat(await readFile("/proc/uptime", "utf8")) || 0;
+	} catch {
+		return 0;
+	}
+}
+
 export class JobsCollector {
-	private readonly opts: Required<Omit<CollectorOptions, "now" | "sessionId">> & { now: () => number; sessionId?: string };
+	private readonly opts: Required<Omit<CollectorOptions, "now" | "sessionId" | "sessionStartedAt">> & {
+		now: () => number;
+		sessionId?: string;
+		sessionStartedAt?: number;
+	};
 	private readonly remembered = new Map<number, Remembered>();
 	/** Pids whose /proc/<pid>/environ was already read; pruned when they exit. */
 	private readonly envChecked = new Set<number>();
+	/** Units named by this session's tool commands (`systemctl start …`), even if already active. */
+	private readonly claimed = new Set<string>();
+	/** Session start in the boot-relative monotonic clock systemd stamps activations with. */
+	private sessionMonoUs?: number;
 	private cache?: { at: number; units: SystemdUnit[]; timers: SystemdTimer[]; jobs: SystemdJob[] };
+
+	/**
+	 * Remember the units a tool command acted on. Called by the extension for every tool call, so a
+	 * `systemctl start` that found the unit already running still counts as this session's.
+	 */
+	noteCommand(text: string): void {
+		let changed = false;
+		for (const unit of unitsInCommand(text)) {
+			if (this.claimed.has(unit)) continue;
+			this.claimed.add(unit);
+			changed = true;
+		}
+		// A newly claimed unit should show up on the next poll, not after the 8 s unit cache.
+		if (changed) this.cache = undefined;
+	}
 
 	constructor(options: CollectorOptions = {}) {
 		this.opts = {
@@ -440,7 +598,8 @@ export class JobsCollector {
 			home: options.home ?? homedir(),
 			minAgeMs: options.minAgeMs ?? DEFAULT_MIN_AGE_MS,
 			includeSystem: options.includeSystem ?? true,
-			allUnits: options.allUnits ?? false,
+			unitScope: options.unitScope ?? "session",
+			sessionStartedAt: options.sessionStartedAt,
 			sessionId: options.sessionId,
 			now: options.now ?? Date.now,
 		};
@@ -467,6 +626,7 @@ export class JobsCollector {
 			units: systemd.units,
 			timers: systemd.timers,
 			jobs: systemd.jobs,
+			unitScope: this.opts.unitScope,
 		};
 	}
 
@@ -527,6 +687,8 @@ export class JobsCollector {
 		const units: SystemdUnit[] = [];
 		const timers: SystemdTimer[] = [];
 		const jobs: SystemdJob[] = [];
+		const session = this.opts.unitScope === "session";
+		const sessionMonoUs = session ? await this.sessionStartMonoUs() : undefined;
 
 		for (const scope of scopes) {
 			const [servicesRaw, timersRaw, jobsRaw] = await Promise.all([
@@ -537,11 +699,13 @@ export class JobsCollector {
 
 			const services = parseUnitNames(servicesRaw);
 			const timersHere = parseTimers(timersRaw).map((timer) => ({ ...timer, scope }));
-			const own = await this.ownUnits(scope, [...services, ...timersHere.map((timer) => timer.unit)]);
+			const infos = await this.unitInfos(scope, [...services, ...timersHere.map((timer) => timer.unit)]);
+			const keep = (unit: string) => this.keepUnit(scope, unit, infos.get(unit), sessionMonoUs);
 
-			for (const unit of services) if (own.has(unit)) units.push({ unit, scope });
-			for (const timer of timersHere) if (own.has(timer.unit)) timers.push(timer);
-			jobs.push(...parseJobs(jobsRaw, scope));
+			for (const unit of services) if (keep(unit)) units.push({ unit, scope });
+			for (const timer of timersHere) if (keep(timer.unit)) timers.push(timer);
+			// A pending job belongs to this session only when this session asked for that unit.
+			jobs.push(...parseJobs(jobsRaw, scope).filter((job) => !session || this.claimed.has(job.unit)));
 		}
 
 		units.sort((a, b) => a.unit.localeCompare(b.unit));
@@ -549,31 +713,60 @@ export class JobsCollector {
 		return { units, timers, jobs };
 	}
 
-	/** Fragment path decides ownership: a unit the user wrote is one whose file lives in their config. */
-	private async ownUnits(scope: Scope, names: string[]): Promise<Set<string>> {
-		const kept = new Set<string>();
-		const unique = [...new Set(names)];
-		if (unique.length === 0) return kept;
-		if (this.opts.allUnits) {
-			for (const unit of unique) kept.add(unit);
-			return kept;
-		}
+	/** Session start expressed in systemd's monotonic clock, or undefined when it cannot be derived. */
+	private async sessionStartMonoUs(): Promise<number | undefined> {
+		if (this.sessionMonoUs !== undefined) return this.sessionMonoUs;
+		const startedAt = this.opts.sessionStartedAt;
+		if (startedAt === undefined) return undefined;
+		const uptimeSec = await readUptimeSec();
+		if (uptimeSec <= 0) return undefined;
+		const nowUs = uptimeSec * 1_000_000;
+		this.sessionMonoUs = nowUs - Math.max(0, this.opts.now() - startedAt) * 1000;
+		return this.sessionMonoUs;
+	}
 
-		const raw = await execText(scope, ["show", "--no-pager", "-p", "Id", "-p", "FragmentPath", ...unique]);
-		const paths = parseFragments(raw);
+	/**
+	 * Keep a unit when it fits the configured scope. `session` accepts a unit this session named on a
+	 * command line or one systemd activated after the session started; both filters still require the
+	 * unit to be the user's own, so a distribution unit that happened to restart is not shown.
+	 */
+	private keepUnit(scope: Scope, unit: string, info: UnitInfo | undefined, sessionMonoUs: number | undefined): boolean {
+		if (this.opts.unitScope === "all") return true;
+		const own = !!info && isOwnUnit(scope, info.fragmentPath, info.realPath, this.opts.home);
+		if (this.opts.unitScope === "owner") return own;
+		if (!own) return false;
+		return this.claimed.has(unit) || startedThisSession(info, sessionMonoUs);
+	}
+
+	/** Fragment path decides ownership, plus the activation stamp the session filter needs. */
+	private async unitInfos(scope: Scope, names: string[]): Promise<Map<string, UnitInfo>> {
+		const infos = new Map<string, UnitInfo>();
+		const unique = [...new Set(names)];
+		if (unique.length === 0) return infos;
+
+		const raw = await execText(scope, [
+			"show",
+			"--no-pager",
+			"-p",
+			"Id",
+			"-p",
+			"FragmentPath",
+			"-p",
+			"ActiveEnterTimestampMonotonic",
+			...unique,
+		]);
+		for (const [unit, info] of parseUnitInfo(raw)) infos.set(unit, info);
+
 		await Promise.all(
-			unique.map(async (unit) => {
-				const reported = paths.get(unit);
-				if (!reported) return;
-				let resolved = reported;
+			[...infos.values()].map(async (info) => {
+				if (!info.fragmentPath) return;
 				try {
-					resolved = await realpath(reported);
+					info.realPath = await realpath(info.fragmentPath);
 				} catch {
 					// deleted or unreadable unit file: judge by the reported path
 				}
-				if (isOwnUnit(scope, reported, resolved, this.opts.home)) kept.add(unit);
 			}),
 		);
-		return kept;
+		return infos;
 	}
 }

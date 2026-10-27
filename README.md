@@ -2,16 +2,17 @@
 
 A small live panel above the [pi](https://pi.dev) editor that answers one question while you work:
 
-> what is running right now — the scripts pi started, and my systemd units?
+> what did **this** session set running — the scripts pi started, and the systemd units and timers
+> it started or invoked?
 
 ```
-⚙ jobs 1 script · 4 units  ctrl+shift+j
+⚙ jobs 1 script · 1 unit  ctrl+shift+j
 ```
 
 Press the shortcut (or run `/jobs`) to expand it:
 
 ```
-⚙ jobs 3 scripts · 4 units · 1 timer  ctrl+shift+j
+⚙ jobs 3 scripts · 2 units · 1 timer · this session  ctrl+shift+j
   scripts
     ● 12s  npm run dev
       ● 12s  node bin/dev.js
@@ -19,10 +20,14 @@ Press the shortcut (or run `/jobs`) to expand it:
   user units
     ● hdmi-autoconfig.service
     ● mc-chat-bridge.service
-    ● mic-lock.service
   timers
     ◷ marketpulse-scan.timer · in 12m
 ```
+
+Units, timers and jobs are **session-scoped**: a row appears only when this session started the unit
+or named it on a command line. A unit that was already running when the session began — started at
+boot, or left behind by an earlier session — stays hidden, so the panel never mixes your sessions
+together. `JOBS_UNIT_SCOPE` widens that if you do want machine-wide state.
 
 The collapsed form is one line and sits next to pi-subagents' widget instead of fighting it for the
 same space: both use `setWidget(..., { placement: "aboveEditor" })` with their own widget key
@@ -34,9 +39,9 @@ same space: both use `setWidget(..., { placement: "aboveEditor" })` with their o
 |---|---|---|
 | `scripts` | `/proc` | Live descendants of the pi process: tool commands, MCP servers, the servers and scripts you started. A `bash -lc "…"` wrapper with a single child is collapsed into that child, and absolute program paths are shortened to the program name. |
 | `↗ … detached` | remembered pids, `PI_SESSION_ID` | A process pi started that outlived its parent (`nohup … &`). Recognised either by remembering the pid **and** start time (a reused pid is never shown as the old job) or by the session id in its environment, so a job that detached before the first poll is still found. |
-| `user units` / `system units` | `systemctl` | Active services (and timers) whose unit file you wrote — `~/.config/systemd/user`, `~/.local/share/systemd/user`, or `/etc/systemd/system`. Distribution services are filtered out. |
-| `timers` | `systemctl list-timers` | Only the timers you defined, with their next elapse. |
-| `jobs` | `systemctl list-jobs` | Units with a queued/running job (`start`, `stop`, …). Usually empty. |
+| `user units` / `system units` | `systemctl` | Only units this session touched: one whose activation stamp (`ActiveEnterTimestampMonotonic`) falls inside the session, or one the session named on a command line (`systemctl start …`, `systemd-run --unit=…`, or an explicit `foo.service` / `foo.timer` token). Distribution units stay out either way. |
+| `timers` | `systemctl list-timers` | Same session filter as the units, with the next elapse. |
+| `jobs` | `systemctl list-jobs` | Queued/running jobs (`start`, `stop`, …) for units this session asked for. Usually empty. |
 
 A process must have lived for `JOBS_MIN_AGE_MS` (default 400 ms) to get a row, so one-line commands
 do not flicker through the panel. The expanded panel is capped at 13 lines; the header counts still
@@ -88,8 +93,9 @@ All optional, via environment variables:
 |---|---|---|
 | `JOBS_KEY` | `ctrl+shift+j` | Toggle shortcut. Any pi key id (`alt+j`, `ctrl+shift+u`, …). |
 | `JOBS_MIN_AGE_MS` | `400` | Minimum process age before it gets a row. |
-| `JOBS_SYSTEM` | `1` | Include user-defined units from `/etc/systemd/system`. `0` = user scope only. |
-| `JOBS_ALL_UNITS` | `0` | `1` shows every active unit, not only the ones you defined. |
+| `JOBS_UNIT_SCOPE` | `session` | `session` = only units this session started or named · `owner` = every active unit whose file lives in your own systemd config · `all` = every active unit. |
+| `JOBS_SYSTEM` | `1` | Include system-scope units from `/etc/systemd/system`. `0` = user scope only. |
+| `JOBS_ALL_UNITS` | `0` | Legacy alias for `JOBS_UNIT_SCOPE=all`. |
 
 ```bash
 JOBS_KEY=alt+j pi
@@ -110,7 +116,7 @@ timer rows show names only.
 ## Development
 
 ```bash
-bun test                           # parsing, ownership filter, layout (27 tests)
+bun test                           # parsing, ownership and session filter, layout (30 tests)
 bun test/live.ts                   # real machine smoke check (spawns a sleep, prints the panel)
 bunx tsc --noEmit -p tsconfig.json # typecheck against pi's real types
 ```

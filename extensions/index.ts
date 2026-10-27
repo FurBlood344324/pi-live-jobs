@@ -1,7 +1,7 @@
 /**
  * index.ts — pi-live-jobs: a collapsible widget above the editor showing
  *   (1) the processes pi spawned — scripts, servers, long commands, plus ones that detached —
- *   (2) the user's active systemd units, timers and running jobs.
+ *   (2) the systemd units, timers and jobs this session started or invoked.
  *
  * Read-only by design: it observes /proc and asks systemctl for state; it never starts, stops,
  * signals or kills anything. Every poll is independent, so a missing systemd or a permission error
@@ -10,12 +10,16 @@
  * Environment:
  *   JOBS_KEY          toggle shortcut (default ctrl+shift+j)
  *   JOBS_MIN_AGE_MS   process age before it gets a row (default 400)
- *   JOBS_SYSTEM       1 shows user-defined units from /etc/systemd/system too (default 1)
- *   JOBS_ALL_UNITS    1 shows every active unit, not only the ones the user defined (default 0)
+ *   JOBS_SYSTEM       1 also watches system-scope units in /etc/systemd/system (default 1)
+ *   JOBS_UNIT_SCOPE   session | owner | all (default session)
+ *                       session — only units this session started or named on a command line
+ *                       owner   — every active unit whose file lives in the user's config
+ *                       all     — every active unit, distribution units included
+ *   JOBS_ALL_UNITS    1 is the old name for JOBS_UNIT_SCOPE=all (kept for compatibility)
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { DEFAULT_MIN_AGE_MS, emptySnapshot, JobsCollector, type Snapshot } from "./collect";
+import { DEFAULT_MIN_AGE_MS, emptySnapshot, JobsCollector, type Snapshot, type UnitScope } from "./collect";
 import { countsText, renderPanel, type PanelState } from "./render";
 
 const WIDGET_KEY = "jobs";
@@ -35,6 +39,26 @@ function envFlag(name: string, fallback: boolean): boolean {
 function envNumber(name: string, fallback: number): number {
 	const value = Number(process.env[name]);
 	return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function envUnitScope(): UnitScope {
+	const raw = process.env.JOBS_UNIT_SCOPE?.trim().toLowerCase();
+	if (raw === "session" || raw === "owner" || raw === "all") return raw;
+	return envFlag("JOBS_ALL_UNITS", false) ? "all" : "session";
+}
+
+/**
+ * The command text of a tool call, so a `systemctl start` this session runs can claim its unit. Only
+ * arguments that hold a command or a script are read; other tools have nothing to contribute.
+ */
+function toolCommandText(event: ToolCallEvent): string {
+	const input = event.input as Record<string, unknown>;
+	const parts: string[] = [];
+	for (const key of ["command", "code", "script"]) {
+		const value = input[key];
+		if (typeof value === "string") parts.push(value);
+	}
+	return parts.join("\n");
 }
 
 interface WidgetHandle {
@@ -159,7 +183,10 @@ export default function liveJobs(pi: ExtensionAPI) {
 				return;
 			}
 			if (arg === "help" || arg === "?") {
-				context.ui.notify("jobs: /jobs toggles · on · off · refresh · status", "info");
+				context.ui.notify(
+					`jobs: /jobs toggles · on · off · refresh · status · units: ${snapshot?.unitScope ?? envUnitScope()} (JOBS_UNIT_SCOPE)`,
+					"info",
+				);
 				return;
 			}
 			toggle(context);
@@ -180,13 +207,22 @@ export default function liveJobs(pi: ExtensionAPI) {
 		collector = new JobsCollector({
 			rootPid: process.pid,
 			includeSystem: envFlag("JOBS_SYSTEM", true),
-			allUnits: envFlag("JOBS_ALL_UNITS", false),
+			unitScope: envUnitScope(),
+			sessionStartedAt: Date.now(),
 			minAgeMs: envNumber("JOBS_MIN_AGE_MS", DEFAULT_MIN_AGE_MS),
 			sessionId: context.sessionManager.getSessionId(),
 		});
 		void refresh(true);
 		poller = setInterval(() => void refresh(), POLL_MS);
 		poller.unref?.();
+	});
+
+	// Units and timers are attributed to this session by the commands it runs and by their activation
+	// stamp; nothing is executed here, the text is only scanned.
+	pi.on("tool_call", (event) => {
+		if (!collector) return;
+		const text = toolCommandText(event);
+		if (text) collector.noteCommand(text);
 	});
 
 	pi.on("session_shutdown", () => {

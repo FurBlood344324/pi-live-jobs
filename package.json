@@ -1,7 +1,7 @@
 {
   "name": "pi-live-jobs",
-  "version": "0.1.0",
-  "description": "Live jobs panel for pi: scripts spawned from pi and active systemd units/timers/jobs in a collapsible widget above the editor.",
+  "version": "0.2.0",
+  "description": "Live jobs panel for pi: scripts spawned from pi and the systemd units/timers/jobs this session started, in a collapsible widget above the editor.",
   "keywords": [
     "pi-package",
     "pi",
